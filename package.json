@@ -1,0 +1,14 @@
+{
+  "name": "resume-skill-extractor",
+  "version": "1.0.0",
+  "description": "Extract structured resume details from PDF resumes using a free LLM model.",
+  "main": "extract-resume.js",
+  "type": "commonjs",
+  "scripts": {
+    "extract": "node extract-resume.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "pdf-parse": "^1.1.1"
+  }
+}
