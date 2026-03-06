@@ -69,9 +69,13 @@ async function fetchAvailableFreeModels() {
   const payload = await response.json();
   const models = Array.isArray(payload?.data) ? payload.data : [];
 
-  return models
+  const freeModels = models
     .filter((model) => model?.id?.endsWith(':free'))
     .map((model) => model.id);
+
+  // console.log("[Free available Models]: ", freeModels);
+
+  return freeModels;
 }
 
 function buildModelCandidates(discoveredFreeModels) {
@@ -174,7 +178,9 @@ ${resumeText.slice(0, 35000)}
 
   for (const model of modelCandidates) {
     try {
-      return await requestExtraction(model, prompt);
+      const res = await requestExtraction(model, prompt);
+      // console.log("[Model name]: ", model)
+      return res;
     } catch (error) {
       errors.push(error.message);
 
