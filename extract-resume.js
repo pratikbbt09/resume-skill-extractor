@@ -6,7 +6,13 @@ const pdfParse = require('pdf-parse');
 require('dotenv').config();
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.1-8b-instruct:free';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL;
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+const FALLBACK_FREE_MODELS = [
+  'meta-llama/llama-3.3-8b-instruct:free',
+  'qwen/qwen-2.5-7b-instruct:free',
+  'mistralai/mistral-7b-instruct:free'
+];
 
 async function extractPdfText(pdfPath) {
   const absolutePath = path.resolve(pdfPath);
@@ -48,6 +54,86 @@ function normalizeOutput(result) {
   };
 }
 
+async function fetchAvailableFreeModels() {
+  const response = await fetch(`${OPENROUTER_BASE_URL}/models`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`
+    }
+  });
+
+  if (!response.ok) {
+    return [];
+  }
+
+  const payload = await response.json();
+  const models = Array.isArray(payload?.data) ? payload.data : [];
+
+  return models
+    .filter((model) => model?.id?.endsWith(':free'))
+    .map((model) => model.id);
+}
+
+function buildModelCandidates(discoveredFreeModels) {
+  const candidates = [];
+
+  if (OPENROUTER_MODEL) {
+    candidates.push(OPENROUTER_MODEL);
+  }
+
+  candidates.push(...FALLBACK_FREE_MODELS);
+  candidates.push(...discoveredFreeModels);
+
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+async function requestExtraction(model, prompt) {
+  const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://localhost',
+      'X-Title': 'resume-skill-extractor'
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: 'Return strict JSON only.' },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.1
+    })
+  });
+
+  if (!response.ok) {
+    const errBody = await response.text();
+    const error = new Error(`LLM API request failed for model '${model}' (${response.status}): ${errBody}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  const completion = await response.json();
+  const content = completion?.choices?.[0]?.message?.content;
+
+  if (!content) {
+    throw new Error(`LLM API returned an empty response for model '${model}'.`);
+  }
+
+  const jsonText = sanitizeJson(content);
+  const parsed = JSON.parse(jsonText);
+
+  return normalizeOutput(parsed);
+}
+
+function isRetryableModelError(error) {
+  if (!error || typeof error.status !== 'number') {
+    return false;
+  }
+
+  return error.status === 404 || error.status === 429;
+}
+
 async function extractResumeDetailsWithLlm(resumeText) {
   if (!OPENROUTER_API_KEY) {
     throw new Error('Missing OPENROUTER_API_KEY in environment variables.');
@@ -77,40 +163,30 @@ Resume text:
 ${resumeText.slice(0, 35000)}
 """`;
 
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://localhost',
-      'X-Title': 'resume-skill-extractor'
-    },
-    body: JSON.stringify({
-      model: OPENROUTER_MODEL,
-      messages: [
-        { role: 'system', content: 'Return strict JSON only.' },
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.1
-    })
-  });
+  const discoveredFreeModels = await fetchAvailableFreeModels();
+  const modelCandidates = buildModelCandidates(discoveredFreeModels);
 
-  if (!response.ok) {
-    const errBody = await response.text();
-    throw new Error(`LLM API request failed (${response.status}): ${errBody}`);
+  if (modelCandidates.length === 0) {
+    throw new Error('No free models available. Set OPENROUTER_MODEL in .env to a working model id.');
   }
 
-  const completion = await response.json();
-  const content = completion?.choices?.[0]?.message?.content;
+  const errors = [];
 
-  if (!content) {
-    throw new Error('LLM API returned an empty response.');
+  for (const model of modelCandidates) {
+    try {
+      return await requestExtraction(model, prompt);
+    } catch (error) {
+      errors.push(error.message);
+
+      if (!isRetryableModelError(error)) {
+        throw error;
+      }
+    }
   }
 
-  const jsonText = sanitizeJson(content);
-  const parsed = JSON.parse(jsonText);
-
-  return normalizeOutput(parsed);
+  throw new Error(
+    `Unable to process with available models. Tried: ${modelCandidates.join(', ')}. Errors: ${errors.join(' | ')}`
+  );
 }
 
 async function main() {
